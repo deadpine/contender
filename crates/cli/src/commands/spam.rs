@@ -7,6 +7,7 @@ use alloy::{
         U256,
     },
     providers::{Provider, ProviderBuilder},
+    rpc::types::TransactionRequest,
     transports::http::reqwest::Url,
 };
 use contender_core::{
@@ -238,23 +239,23 @@ async fn get_max_spam_cost<D: DbOps + Send + Sync + 'static, S: Seeder + Send + 
 
     let gas_price = rpc_client.get_gas_price().await?;
 
-    // get gas limit for each tx
+    // set gas price & limit for each tx
     let mut prepared_sample_txs = vec![];
     for tx in sample_txs {
         let tx_req = tx.tx;
         let (prepared_req, _signer) = scenario.prepare_tx_request(&tx_req, gas_price).await?;
-        println!(
-            "tx_request gas={:?} gas_price={:?} ({:?}, {:?})",
-            prepared_req.gas,
-            prepared_req.gas_price,
-            prepared_req.max_fee_per_gas,
-            prepared_req.max_priority_fee_per_gas
-        );
         prepared_sample_txs.push(prepared_req);
     }
 
     // get the highest gas cost of all spam txs
-    let highest_gas_cost = prepared_sample_txs
+    let highest_gas_cost = get_max_cost(&prepared_sample_txs)?;
+
+    // we assume the highest possible cost to minimize the chances of running out of ETH mid-test
+    Ok(highest_gas_cost)
+}
+
+fn get_max_cost(tx_requests: &[TransactionRequest]) -> Result<U256, Box<dyn std::error::Error>> {
+    Ok(tx_requests
         .iter()
         .map(|tx| {
             let mut gas_price = tx.max_fee_per_gas.unwrap_or(tx.gas_price.unwrap_or(0));
@@ -268,8 +269,5 @@ async fn get_max_spam_cost<D: DbOps + Send + Sync + 'static, S: Seeder + Send + 
         .ok_or(ContenderError::SpamError(
             "failed to get max gas cost for spam txs",
             None,
-        ))?;
-
-    // we assume the highest possible cost to minimize the chances of running out of ETH mid-test
-    Ok(highest_gas_cost)
+        ))?)
 }

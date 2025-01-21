@@ -13,14 +13,14 @@ use alloy::consensus::Transaction;
 use alloy::eips::eip2718::Encodable2718;
 use alloy::hex::ToHexExt;
 use alloy::network::{AnyNetwork, EthereumWallet, TransactionBuilder};
-use alloy::primitives::{keccak256, Address, FixedBytes};
+use alloy::primitives::{keccak256, Address, FixedBytes, U256};
 use alloy::providers::{PendingTransactionConfig, Provider, ProviderBuilder};
 use alloy::rpc::types::TransactionRequest;
 use alloy::signers::local::PrivateKeySigner;
 use alloy::transports::http::reqwest::Url;
 use contender_bundle_provider::{BundleClient, EthSendBundle};
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 /// A test scenario can be used to run a test with a specific configuration, database, and RPC provider.
 #[derive(Clone, Debug)]
@@ -137,7 +137,71 @@ where
         Ok(())
     }
 
-    pub async fn deploy_contracts(&mut self) -> Result<()> {
+    fn estimate_cost(
+        &self,
+        tx_req: NamedTxRequest,
+        total_cost: Arc<Mutex<U256>>,
+        gas_price: u128,
+    ) -> Result<Option<tokio::task::JoinHandle<()>>> {
+        let from = tx_req.tx.from.to_owned().ok_or(ContenderError::SetupError(
+            "failed to get 'from' address",
+            None,
+        ))?;
+        let wallet_conf = self
+            .wallet_map
+            .get(&from)
+            .unwrap_or_else(|| panic!("couldn't find wallet for 'from' address {}", from))
+            .to_owned();
+        let wallet = ProviderBuilder::new()
+            // simple_nonce_management is unperformant but it's OK bc we're just deploying
+            .with_simple_nonce_management()
+            .wallet(wallet_conf)
+            .on_http(self.rpc_url.to_owned());
+        let total_cost = total_cost.clone();
+        let handle = tokio::task::spawn(async move {
+            let gas_limit = wallet
+                .estimate_gas(&tx_req.tx)
+                .await
+                .expect("failed to estimate gas");
+            let gas_cost = gas_limit * gas_price;
+            let tc = *total_cost.lock().expect("failed to unlock mutex");
+            *total_cost.lock().expect("failed to unlock mutex") =
+                tc + U256::from(gas_cost) + tx_req.tx.value.unwrap_or_default();
+        });
+        Ok(Some(handle))
+    }
+
+    pub async fn estimate_deployment_cost(&self) -> Result<U256> {
+        let total_cost = Arc::new(Mutex::new(U256::ZERO));
+        let gas_price = self
+            .eth_client
+            .get_gas_price()
+            .await
+            .map_err(|e| ContenderError::with_err(e, "failed to get gas price"))?;
+        self.load_txs(PlanType::Create(|tx_req| {
+            self.estimate_cost(tx_req, total_cost.clone(), gas_price)
+        }))
+        .await?;
+        let cost = *total_cost.lock().expect("failed to unlock mutex");
+        Ok(cost)
+    }
+
+    pub async fn estimate_setup_cost(&self) -> Result<U256> {
+        let total_cost = Arc::new(Mutex::new(U256::ZERO));
+        let gas_price = self
+            .eth_client
+            .get_gas_price()
+            .await
+            .map_err(|e| ContenderError::with_err(e, "failed to get gas price"))?;
+        self.load_txs(PlanType::Setup(|tx_req| {
+            self.estimate_cost(tx_req, total_cost.clone(), gas_price)
+        }))
+        .await?;
+        let cost = *total_cost.lock().expect("failed to unlock mutex");
+        Ok(cost)
+    }
+
+    pub async fn deploy_contracts(&mut self, deployment_id: impl AsRef<str>) -> Result<()> {
         let pub_provider = &self.rpc_client;
         let gas_price = pub_provider
             .get_gas_price()
@@ -213,15 +277,15 @@ where
                     receipt.contract_address.unwrap_or_default()
                 );
                 db.insert_named_txs(
-                    NamedTx::new(
+                    vec![NamedTx::new(
                         tx_req.name.unwrap_or_default(),
                         receipt.transaction_hash,
                         receipt.contract_address,
-                    )
-                    .into(),
+                    )],
                     rpc_url.as_str(),
                 )
                 .expect("failed to insert tx into db");
+                println!("contract deployed: {:?}", receipt.contract_address); // TODO: delete (debugging)
             });
             Ok(Some(handle))
         }))
@@ -281,8 +345,11 @@ where
                 let receipt = res.get_receipt().await.expect("failed to get receipt");
                 if let Some(name) = tx_req.name {
                     db.insert_named_txs(
-                        NamedTx::new(name, receipt.transaction_hash, receipt.contract_address)
-                            .into(),
+                        vec![NamedTx::new(
+                            name,
+                            receipt.transaction_hash,
+                            receipt.contract_address,
+                        )],
                         rpc_url.as_str(),
                     )
                     .expect("failed to insert tx into db");
@@ -1036,7 +1103,7 @@ pub mod tests {
     async fn setup_steps_use_agent_signers() {
         let anvil = spawn_anvil();
         let mut scenario = get_test_scenario(&anvil).await;
-        scenario.deploy_contracts().await.unwrap();
+        scenario.deploy_contracts("test_id").await.unwrap();
         let setup_steps = scenario
             .load_txs(PlanType::Setup(|_| Ok(None)))
             .await
@@ -1071,7 +1138,7 @@ pub mod tests {
     async fn scenario_creates_contracts() {
         let anvil = spawn_anvil();
         let mut scenario = get_test_scenario(&anvil).await;
-        let res = scenario.deploy_contracts().await;
+        let res = scenario.deploy_contracts("test_id").await;
         assert!(res.is_ok());
     }
 
@@ -1079,7 +1146,7 @@ pub mod tests {
     async fn scenario_runs_setup() {
         let anvil = spawn_anvil();
         let mut scenario = get_test_scenario(&anvil).await;
-        scenario.deploy_contracts().await.unwrap();
+        scenario.deploy_contracts("test_id").await.unwrap();
         let res = scenario.run_setup().await;
         println!("{:?}", res);
         assert!(res.is_ok());

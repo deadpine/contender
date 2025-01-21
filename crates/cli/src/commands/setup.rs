@@ -1,6 +1,9 @@
 use alloy::{
     network::AnyNetwork,
-    primitives::utils::{format_ether, parse_ether},
+    primitives::{
+        utils::{format_ether, parse_ether},
+        U256,
+    },
     providers::ProviderBuilder,
     signers::local::PrivateKeySigner,
     transports::http::reqwest::Url,
@@ -34,6 +37,12 @@ pub async fn setup(
     let eth_client = ProviderBuilder::new().on_http(url.to_owned());
     let testconfig: TestConfig = TestConfig::from_file(testfile.as_ref())?;
     let min_balance = parse_ether(&min_balance)?;
+    let deployment_id = format!(
+        "contender_deploy__{}_{}",
+        testfile.as_ref(),
+        url.to_string()
+    );
+    println!("Deployment ID: {}", deployment_id);
 
     let user_signers = private_keys
         .as_ref()
@@ -120,8 +129,46 @@ pub async fn setup(
     )
     .await?;
 
-    scenario.deploy_contracts().await?;
-    println!("Finished deploying contracts. Running setup txs...");
+    let setup_cost_err = |name: &str, cost: U256| {
+        Err(ContenderError::SetupError(
+            "min_balance is not enough to cover the cost of ",
+            Some(format!(
+                "{}. min_balance: {}, setup_cost: {}",
+                name,
+                format_ether(min_balance),
+                format_ether(cost)
+            )),
+        )
+        .into())
+    };
+
+    let deployment_cost = scenario.estimate_deployment_cost().await?;
+    if min_balance < deployment_cost {
+        return setup_cost_err("deployment", deployment_cost);
+    }
+
+    scenario.deploy_contracts(deployment_id).await?;
+    println!("Finished deploying contracts. Preparing setup txs...");
+
+    let setup_cost: U256 = scenario.estimate_setup_cost().await.unwrap_or(
+        // sum up values if estimation fails
+        scenario
+            .config
+            .setup
+            .to_owned()
+            .unwrap_or_default()
+            .iter()
+            .map(|tx| {
+                tx.value
+                    .as_ref()
+                    .map(|v| U256::from_str(&v).unwrap_or_default())
+                    .unwrap_or_default()
+            })
+            .sum::<U256>(),
+    );
+    if min_balance < setup_cost {
+        return setup_cost_err("setup", setup_cost);
+    }
     scenario.run_setup().await?;
     println!("Setup complete. To run the scenario, use the `spam` command.");
 

@@ -24,7 +24,7 @@ use crate::{
 
 pub async fn run(
     db: &(impl DbOps + Clone + Send + Sync + 'static),
-    scenario: BuiltinScenario,
+    scenario_def: BuiltinScenario,
     rpc_url: String,
     private_key: Option<String>,
     interval: usize,
@@ -50,7 +50,7 @@ pub async fn run(
         .map(|s| u16::from_str(&s).expect("invalid u16: fill_percent"))
         .unwrap_or(100u16);
 
-    let scenario_config = match scenario {
+    let scenario_config = match scenario_def {
         BuiltinScenario::FillBlock => BuiltinScenarioConfig::fill_block(
             block_gas_limit,
             txs_per_duration as u64,
@@ -87,7 +87,13 @@ pub async fn run(
 
     if do_deploy_contracts {
         println!("deploying contracts...");
-        scenario.deploy_contracts().await?;
+        scenario
+            .deploy_contracts(format!(
+                "contender_deploy_default__{}_{}",
+                scenario_def.to_string(),
+                rpc_url.to_string()
+            ))
+            .await?;
     }
 
     println!("running setup...");

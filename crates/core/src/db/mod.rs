@@ -36,12 +36,6 @@ impl NamedTx {
     }
 }
 
-impl From<NamedTx> for Vec<NamedTx> {
-    fn from(named_tx: NamedTx) -> Self {
-        vec![named_tx]
-    }
-}
-
 pub trait DbOps {
     fn create_tables(&self) -> Result<()>;
 

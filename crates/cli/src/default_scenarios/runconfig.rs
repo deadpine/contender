@@ -4,10 +4,19 @@ use contender_testfile::TestConfig;
 use serde::{Deserialize, Serialize};
 
 use super::bytecode;
+use std::fmt;
 
 #[derive(Serialize, Deserialize, Debug, Clone, clap::ValueEnum)]
 pub enum BuiltinScenario {
     FillBlock,
+}
+
+impl fmt::Display for BuiltinScenario {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BuiltinScenario::FillBlock => write!(f, "FillBlock"),
+        }
+    }
 }
 
 pub enum BuiltinScenarioConfig {
